@@ -98,11 +98,8 @@ class App:
                 duration = t1 - t0
                 cv2.putText(frame, 'FPS: ' + str(1 / duration)[:4].strip('.'), (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-            a = np.concatenate([frame, (255 * np.random.rand(*frame.shape)).astype(np.uint8)], 1)
-
-            # print a.shape
-
-            cv2.imshow(self.win_name, a)
+            # a = np.concatenate([frame, (255 * np.random.rand(*frame.shape)).astype(np.uint8)], 1)
+            cv2.imshow(self.win_name, frame)
             c = cv2.waitKey(self.inteval) & 0xFF
             if c == 27 or c == ord('q'):
                 break
