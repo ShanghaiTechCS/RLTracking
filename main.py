@@ -1,110 +1,121 @@
-# -*- coding: utf-8 -*-
-# @Time    : 2017/11/20 下午2:10
-# @Author  : Zhixin Piao 
-# @Email   : piaozhx@shanghaitech.edu.cn
-
+from __future__ import division
 import numpy as np
-import cv2
-import sys
-from time import time
-import kcftracker
+import torch
+import os
+from train import train
+from test import test
+from utils.misc import save_checkpoint
+from utils.video import video_train, video_val
+from utils.visualize import Dashboard
+import os.path as osp
+from model import tracking, tracking_v1
+import argparse
+
+# import utils.vis_gradient as viz
+
+parser = argparse.ArgumentParser(description='RL_Tracking')
+parser.add_argument('--lr', type=float, default=0.01,
+                    help='learning rate (default: 0.001)')
+parser.add_argument('--gamma', type=float, default=0.7,
+                    help='discount factor for rewards (default: 0.99)')
+parser.add_argument('--max-grad-norm', type=float, default=50,
+                    help='value loss coefficient (default: 50)')
+parser.add_argument('--seed', type=int, default=1,
+                    help='random seed (default: 1)')
+parser.add_argument('--num-epochs', type=int, default=50,
+                    help='number of forward epochs in RL Tracking  (default: 50)')
+
+parser.add_argument('--tau', type=float, default=1.00,
+                    help='parameter for GAE (default: 1.00)')
+parser.add_argument('--entropy-coef', type=float, default=0.1,
+                    help='entropy term coefficient (default: 0.01)')
+
+parser.add_argument('--value-loss-coef', type=float, default=0.5,
+                    help='value loss coefficient (default: 0.1)')
+parser.add_argument('--env-name', default='Tracking',
+                    help='environment to train on Visdom')
 
 
-class App:
-    def __init__(self):
-        global selectingObject, initTracking, onTracking, ix, iy, cx, cy, w, h
+# print the parameter's gradients
+def hook_print(grad):
+    print(grad)
 
-        selectingObject = False
-        initTracking = False
-        onTracking = False
-        ix, iy, cx, cy = -1, -1, -1, -1
-        w, h = 0, 0
 
-        self.inteval = 1
-        self.gt_rects = []
+def main():
+    args = parser.parse_args()
 
-        # window
-        self.win_name = 'tracking'
+    if not osp.exists(osp.join('checkpoints', 'Tracking')):
+        os.makedirs(osp.join('checkpoints', 'Tracking'))
+    vis = Dashboard(server='http://localhost', port=8097, env='Tracking')
 
-    # mouse callback function
-    @staticmethod
-    def draw_boundingbox(event, x, y, flags, param):
-        global selectingObject, initTracking, onTracking, ix, iy, cx, cy, w, h
+    model = tracking_v1.TrackModel(pretrained=True)
+    model = model.cuda()
+    # grad = viz.create_viz('main', model, env = 'Tracking')
+    # grad.regis_weight_ratio_plot('critic.fc2', 'weight', 'g/w')
 
-        if event == cv2.EVENT_LBUTTONDOWN:
-            selectingObject = True
-            onTracking = False
-            ix, iy = x, y
-            cx, cy = x, y
+    # feature_extractor network, the same learning rate
+    optimizer = torch.optim.Adam([{'params': model.feature_extractor.parameters()},
+                                  {'params': model.actor.parameters()},
+                                  {'params': model.critic.parameters()},
+                                  {'params': model.rnn.parameters()}],
+                                 lr=args.lr)
+    best_loss = 100
+    train_loss1 = {}
+    train_loss2 = {}
+    train_loss = {}
+    val_loss = {}
+    val_loss1 = {}
+    val_loss2 = {}
+    train_reward = {}
+    val_reward = {}
 
-        elif event == cv2.EVENT_MOUSEMOVE:
-            cx, cy = x, y
+    model.critic.fc2.register_backward_hook(lambda module, grad_input, grad_output: grad_output)
+    model.actor.fc1.weight.register_hook(hook_print)
+    for epoch in range(args.num_epochs):
 
-        elif event == cv2.EVENT_LBUTTONUP:
-            selectingObject = False
-            if (abs(x - ix) > 10 and abs(y - iy) > 10):
-                w, h = abs(x - ix), abs(y - iy)
-                ix, iy = min(x, ix), min(y, iy)
-                initTracking = True
-            else:
-                onTracking = False
+        reward_train, loss_train, loss1_train, loss2_train = train(args=args,
+                                                                   model=model,
+                                                                   optimizer=optimizer,
+                                                                   video_train=video_train)
+        reward_val, loss_val, loss1_val, loss2_val = test(args=args,
+                                                          model=model,
+                                                          video_val=video_val)
 
-        elif event == cv2.EVENT_RBUTTONDOWN:
-            onTracking = False
-            if (w > 0):
-                ix, iy = x - w / 2, y - h / 2
-                initTracking = True
+        train_loss[epoch] = loss_train[0, 0]
+        train_loss1[epoch] = loss1_train[0, 0]
+        train_loss2[epoch] = loss2_train[0, 0]
+        train_reward[epoch] = reward_train
+        val_loss[epoch] = loss_val[0, 0]
+        val_loss1[epoch] = loss1_val[0, 0]
+        val_loss2[epoch] = loss2_val[0, 0]
+        val_reward[epoch] = reward_val
 
-    def read_gt(self, gt_path):
-        for line in open(gt_path, 'r'):
-            x, y, w, h = map(lambda x: float(x), line[:-1].split(','))
-            self.gt_rects.append((x, y, w, h))
+        # for visualization
+        vis.draw(train_data=train_loss, val_data=val_loss, datatype='loss')
+        vis.draw(train_data=train_loss1, val_data=val_loss1, datatype='Loss1')
+        vis.draw(train_data=train_loss2, val_data=val_loss2, datatype='Loss2')
+        vis.draw(train_data=train_reward, val_data=val_reward, datatype='rewards')
 
-    def run(self, seq_name):
-        global initTracking
+        print ('Train', 'epoch:', epoch, 'rewards:{%.6f}' % reward_train, 'loss:{%.6f}' % loss_train),
+        print ('validation', 'epoch:', epoch, 'rewards:{%.6f}' % reward_val, 'loss:{%.6f}' % loss_val),
 
-        self.cap = cv2.VideoCapture('../../Sequences/%s/imgs/%%8d.jpg' % seq_name)
-        self.read_gt('../../Sequences/%s/imgs/groundtruth.txt' % seq_name)
-        self.tracker = kcftracker.KCFTracker(True, True, False)
-
-        cv2.namedWindow(self.win_name)
-        cv2.setMouseCallback(self.win_name, self.draw_boundingbox)
-        self.start_window()
-
-    def start_window(self):
-        global initTracking, onTracking
-        while (self.cap.isOpened()):
-            ret, frame = self.cap.read()
-            if not ret:
-                break
-
-            if selectingObject:
-                cv2.rectangle(frame, (ix, iy), (cx, cy), (0, 255, 255), 1)
-            elif initTracking:
-                cv2.rectangle(frame, (ix, iy), (ix + w, iy + h), (0, 255, 255), 2)
-
-                self.tracker.init([ix, iy, w, h], frame)
-
-                initTracking = False
-                onTracking = True
-            elif onTracking:
-                t0 = time()
-                bbox = self.tracker.update(frame)
-                t1 = time()
-
-                bbox = map(int, bbox)
-                cv2.rectangle(frame, (bbox[0], bbox[1]), (bbox[0] + bbox[2], bbox[1] + bbox[3]), (0, 255, 255), 1)
-
-                duration = t1 - t0
-                cv2.putText(frame, 'FPS: ' + str(1 / duration)[:4].strip('.'), (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-
-            # a = np.concatenate([frame, (255 * np.random.rand(*frame.shape)).astype(np.uint8)], 1)
-            cv2.imshow(self.win_name, frame)
-            c = cv2.waitKey(self.inteval) & 0xFF
-            if c == 27 or c == ord('q'):
-                break
+        if best_loss > loss_val[0, 0]:
+            best_loss = loss_val
+            is_best = True
+            save_checkpoint({
+                'epoch': epoch + 1,
+                'state_dict': model.state_dict(),
+                'best_loss1': best_loss,
+                'train_loss': train_loss,
+                'val_loss': val_loss,
+                'train_rewards': train_reward,
+                'val_rewards': val_reward,
+            }, is_best,
+                filename='epoch_{}.pth.tar'.format(epoch + 1),
+                dir=os.path.join('checkpoints', 'Tracking'), epoch=epoch)
 
 
 if __name__ == '__main__':
-    app = App()
-    app.run('basketball')
+    np.random.seed(10)
+    torch.manual_seed(10)
+    main()

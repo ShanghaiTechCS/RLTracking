@@ -1,15 +1,13 @@
-# RLTracking
-利用DRL(Deep Reinforcement Learning)以及CF(Correlation Filter)来做Tracking
+# Env v1.3.2
+### use hist_v1.3
+* resize bg_box area 
+* add gaussian filter and medium filter to improve response map and color map)
 
-## MileStone 
-Due: 2017/11/30
-  
-**报告如下内容**：
-> 1. 了解不同的数据集，实验数据前期整理，OTB，VTB   --刘永飞
-> 2. Staple 以及 KCF 论文中的结果，指出其优缺点。   --朴智新
-> 3. CVPR 模板
+### change reward
+* reward use precision( if dis(ground_truth, target) > 40px return 0 else return 1 - (dis / 40px))
 
-**下一阶段工作**：   
-Due：2017/12/6
-> 1. 实现 RL 中 A3C      -- 刘永飞
-> 2. 改写 Staple 代码，实现 python 版本  --朴智新
+### add file save function
+* add file save function in class Env
+
+### fix bugs
+* fix bugs in show_tracking_result

@@ -189,7 +189,7 @@ class KCFTracker:
 
         if (x1.ndim == 3 and x2.ndim == 3):
             d = (np.sum(x1[:, :, 0] * x1[:, :, 0]) + np.sum(x2[:, :, 0] * x2[:, :, 0]) - 2.0 * c) / (
-                self.size_patch[0] * self.size_patch[1] * self.size_patch[2])
+                    self.size_patch[0] * self.size_patch[1] * self.size_patch[2])
         elif (x1.ndim == 2 and x2.ndim == 2):
             d = (np.sum(x1 * x1) + np.sum(x2 * x2) - 2.0 * c) / (self.size_patch[0] * self.size_patch[1] * self.size_patch[2])
 
@@ -230,8 +230,12 @@ class KCFTracker:
         extracted_roi[3] = int(scale_adjust * self._scale * self._tmpl_sz[1])
         extracted_roi[0] = int(cx - extracted_roi[2] / 2)
         extracted_roi[1] = int(cy - extracted_roi[3] / 2)
+        # save extracted_roi to create heat map
+        if scale_adjust == 1.0:
+            self.extracted_roi = extracted_roi
 
         z = subwindow(image, extracted_roi, cv2.BORDER_REPLICATE)
+
         if (z.shape[1] != self._tmpl_sz[0] or z.shape[0] != self._tmpl_sz[1]):
             z = cv2.resize(z, tuple(self._tmpl_sz))
 
@@ -251,6 +255,8 @@ class KCFTracker:
             FeaturesMap = FeaturesMap.astype(np.float32) / 255.0 - 0.5
             self.size_patch = [z.shape[0], z.shape[1], 1]
 
+
+
         if (inithann):
             self.createHanningMats()  # createHanningMats need size_patch
 
@@ -262,6 +268,7 @@ class KCFTracker:
         res = real(fftd(complexMultiplication(self._alphaf, fftd(k)), True))
 
         _, pv, _, pi = cv2.minMaxLoc(res)  # pv:float  pi:tuple of int
+
         p = [float(pi[0]), float(pi[1])]  # cv::Point2f, [x,y]  #[float,float]
 
         if (pi[0] > 0 and pi[0] < res.shape[1] - 1):
@@ -272,6 +279,7 @@ class KCFTracker:
         p[0] -= res.shape[1] / 2.
         p[1] -= res.shape[0] / 2.
 
+        self.roi_heat_map = res
         return p, pv
 
     def train(self, x, train_interp_factor):
@@ -285,43 +293,52 @@ class KCFTracker:
         self._roi = map(float, roi)
         assert (roi[2] > 0 and roi[3] > 0)
         self._tmpl = self.getFeatures(image, 1)
+
         self._prob = self.createGaussianPeak(self.size_patch[0], self.size_patch[1])
         self._alphaf = np.zeros((self.size_patch[0], self.size_patch[1], 2), np.float32)
         self.train(self._tmpl, 1.0)
 
-    def update(self, image):
+        self.image_h, self.image_w = image.shape[:2]
+
+    def update(self, image, lt_pos):
         if (self._roi[0] + self._roi[2] <= 0):  self._roi[0] = -self._roi[2] + 1
         if (self._roi[1] + self._roi[3] <= 0):  self._roi[1] = -self._roi[2] + 1
         if (self._roi[0] >= image.shape[1] - 1):  self._roi[0] = image.shape[1] - 2
         if (self._roi[1] >= image.shape[0] - 1):  self._roi[1] = image.shape[0] - 2
 
-        cx = self._roi[0] + self._roi[2] / 2.
-        cy = self._roi[1] + self._roi[3] / 2.
+        if lt_pos == None:
+            cx = self._roi[0] + self._roi[2] / 2.
+            cy = self._roi[1] + self._roi[3] / 2.
 
-        loc, peak_value = self.detect(self._tmpl, self.getFeatures(image, 0, 1.0))
+            loc, peak_value = self.detect(self._tmpl, self.getFeatures(image, 0, 1.0))
 
-        if (self.scale_step != 1):
-            # Test at a smaller _scale
-            new_loc1, new_peak_value1 = self.detect(self._tmpl, self.getFeatures(image, 0, 1.0 / self.scale_step))
-            # Test at a bigger _scale
-            new_loc2, new_peak_value2 = self.detect(self._tmpl, self.getFeatures(image, 0, self.scale_step))
+            if (self.scale_step != 1):
+                # Test at a smaller _scale
+                new_loc1, new_peak_value1 = self.detect(self._tmpl, self.getFeatures(image, 0, 1.0 / self.scale_step))
+                # Test at a bigger _scale
+                new_loc2, new_peak_value2 = self.detect(self._tmpl, self.getFeatures(image, 0, self.scale_step))
 
-            if (self.scale_weight * new_peak_value1 > peak_value and new_peak_value1 > new_peak_value2):
-                loc = new_loc1
-                peak_value = new_peak_value1
-                self._scale /= self.scale_step
-                self._roi[2] /= self.scale_step
-                self._roi[3] /= self.scale_step
-            elif (self.scale_weight * new_peak_value2 > peak_value):
-                loc = new_loc2
-                peak_value = new_peak_value2
-                self._scale *= self.scale_step
-                self._roi[2] *= self.scale_step
-                self._roi[3] *= self.scale_step
+                if (self.scale_weight * new_peak_value1 > peak_value and new_peak_value1 > new_peak_value2):
+                    loc = new_loc1
+                    peak_value = new_peak_value1
+                    self._scale /= self.scale_step
+                    self._roi[2] /= self.scale_step
+                    self._roi[3] /= self.scale_step
+                elif (self.scale_weight * new_peak_value2 > peak_value):
+                    loc = new_loc2
+                    peak_value = new_peak_value2
+                    self._scale *= self.scale_step
+                    self._roi[2] *= self.scale_step
+                    self._roi[3] *= self.scale_step
 
-        self._roi[0] = cx - self._roi[2] / 2.0 + loc[0] * self.cell_size * self._scale
-        self._roi[1] = cy - self._roi[3] / 2.0 + loc[1] * self.cell_size * self._scale
+            # left top point
+            self._roi[0] = cx - self._roi[2] / 2.0 + loc[0] * self.cell_size * self._scale
+            self._roi[1] = cy - self._roi[3] / 2.0 + loc[1] * self.cell_size * self._scale
+        else:
+            self._roi[0] = lt_pos[0]
+            self._roi[1] = lt_pos[1]
 
+        # recomputer roi to let bbox not go out of the image
         if (self._roi[0] >= image.shape[1] - 1):  self._roi[0] = image.shape[1] - 1
         if (self._roi[1] >= image.shape[0] - 1):  self._roi[1] = image.shape[0] - 1
         if (self._roi[0] + self._roi[2] <= 0):  self._roi[0] = -self._roi[2] + 2
@@ -332,3 +349,29 @@ class KCFTracker:
         self.train(x, self.interp_factor)
 
         return self._roi
+
+    def run(self, img, lt_pos):
+        return self.update(img, lt_pos)
+
+    def get_heat_map(self):
+        x, y, w, h = self.extracted_roi
+        cx, cy = (x + x + w) / 2.0, (y + y + h) / 2.0
+
+        roi_heat_map = ((self.roi_heat_map - self.roi_heat_map.min()) / (self.roi_heat_map.max() - self.roi_heat_map.min()) * 255).astype(np.uint8)
+
+        # density map size scale
+        rw, rh = map(lambda x: int(x) * 1, self._roi[2:])
+        roi_heat_map = cv2.resize(roi_heat_map, (rw, rh))
+
+        black_image = np.zeros((self.image_h * 3, self.image_w * 3), dtype=np.uint8)
+
+        sy = int(self.image_h + cy - rh / 2.0)
+        ey = sy + rh
+        sx = int(self.image_w + cx - rw / 2.0)
+        ex = sx + rw
+
+        black_image[sy:ey, sx:ex] = roi_heat_map
+        heat_map = black_image[self.image_h:self.image_h * 2, self.image_w:self.image_w * 2]
+
+        heat_map = cv2.cvtColor(heat_map, cv2.COLOR_GRAY2RGB)
+        return heat_map
